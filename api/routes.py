@@ -62,6 +62,7 @@ def receive():
         from_type = msg_data.get('fromType', 0)  # 0或1私聊, 2群聊
         from_wxid = msg_data.get('fromWxid', '')  # 私聊是对方wxid, 群聊是群wxid
         final_from_wxid = msg_data.get('finalFromWxid', '')  # 群聊中发送者wxid, 私聊中空
+        at_wxid_list = msg_data.get('atWxidList', [])  # 获取被@的用户列表
 
         if not from_wxid:
             logger.warning("fromWxid 为空，无法处理")
@@ -71,12 +72,23 @@ def receive():
         msg_source = msg_data.get('msgSource', 0)  # 获取 msgSource 字段
         bot_wxid = current_app.config.get('BOT_WXID', '')  # 确保你在配置中正确设置了 BOT_WXID
 
+        # 检查是否是机器人自己发送的消息
         if msg_source == 1 or (is_group and final_from_wxid == bot_wxid):
             logger.info(f"消息来自机器人自身 (msgSource: {msg_source}, finalFromWxid: {final_from_wxid})，已忽略。")
             return jsonify({
                 "status": "ok",
                 "message": "Self-message ignored."
             }), 200
+
+        # 群聊消息处理逻辑
+        if is_group:
+            # 检查是否有人@机器人，如果没有@机器人则不回复
+            if bot_wxid not in at_wxid_list:
+                logger.info(f"群聊消息未@机器人，忽略。群ID: {from_wxid}, finalFromWxid: {final_from_wxid}")
+                return jsonify({
+                    "status": "ok",
+                    "message": "Message not mentioning bot, no reply sent."
+                }), 200
 
         # 处理特殊命令
         if msg_content == "#清除记忆":
@@ -95,13 +107,28 @@ def receive():
             return jsonify({"status": "ok", "message": "Empty message content"}), 200
 
         # --- 核心逻辑：调用 ChatService 处理普通消息 ---
+        # 处理消息内容，移除@部分（如果是群聊）
+        processed_msg_content = msg_content
+        if is_group and bot_wxid in at_wxid_list:
+            # 移除@机器人的部分，通常格式为"@昵称 实际消息内容"
+            # 这里使用简单的分割方法，可能需要根据实际格式调整
+            parts = msg_content.split('\u2005', 1)  # \u2005是特殊空格字符
+            if len(parts) > 1:
+                processed_msg_content = parts[1].strip()
+            logger.info(f"处理后的群聊消息内容: '{processed_msg_content}'")
+
         result = chat_service.process_wechat_message(
-            question=msg_content,
+            question=processed_msg_content,
             from_wxid=from_wxid,
             final_from_wxid=final_from_wxid,
             is_group=is_group,
-            context={"is_group": is_group}
+            context={"is_group": is_group, "bot_wxid": bot_wxid}
         )
+
+        # 检查是否是机器人自己的消息
+        if result.get("ignore_self_message", False):
+            logger.info("忽略机器人自己发送的消息，不再回复")
+            return jsonify({"status": "ok", "message": "Self-message ignored"}), 200
 
         # 正常的回复处理
         logger.info(f"RagFlow 回复: {result}")
